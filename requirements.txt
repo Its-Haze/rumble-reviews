@@ -1,0 +1,6 @@
+discord.py
+rich
+motor
+aiohttp
+python-dotenv
+pyyaml
