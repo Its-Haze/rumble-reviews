@@ -1,28 +1,33 @@
+"""
+This is the main file for the bot, it will be used to run the bot.
+"""
+
 import asyncio
 import logging as logger
 import typing
 
+import asyncpg
 import discord
 from discord.ext import commands
-from motor.motor_asyncio import AsyncIOMotorClient
-from rumble.logs.logger import setup_logging
+
 from rumble.credentials.loader import EnvLoader
+from rumble.logs.logger import setup_logging
 from rumble.utils.cogs_loader import cog_loader, cog_reloader
-
-from rich import inspect
-
 
 env_loader = EnvLoader()
 setup_logging()
 
 
 class RumbleReviewsBot(commands.Bot):
+    """A class to represent the RumbleReviewsBot."""
+
     def __init__(self) -> None:
-        # intents = discord.Intents.all()
-        intents = discord.Intents.default()
+        """Initialize the RumbleReviewsBot."""
+        intents = discord.Intents.all()
+        intents.message_content = True
         intents.guilds = True
         self.env_loader: EnvLoader = env_loader
-
+        self.pg_pool: asyncpg.Pool | None = None
         command_prefix = "$$$"
         help_command = None
         activity = discord.Activity(
@@ -36,7 +41,6 @@ class RumbleReviewsBot(commands.Bot):
             help_command=help_command,
             activity=activity,
         )
-        self.mongo_client: typing.Optional[AsyncIOMotorClient] = None
 
     async def setup_hook(self) -> None:
         """
@@ -44,25 +48,21 @@ class RumbleReviewsBot(commands.Bot):
         """
         logger.info("Setting up the Hook!")
         await self.tree.sync()
-        self.mongo_client = AsyncIOMotorClient(self.env_loader.mongodb_url)
-        inspect(self.mongo_client)
-
-        self.db = self.mongo_client["rumble_reviews"]
+        self.pg_pool = await asyncpg.create_pool(  # type: ignore
+            self.env_loader.DATABASE_URL
+        )
 
     async def close(self) -> None:
         """
         Close the bot and cleanup
         """
-        self.mongo_client.close()
+        logger.info("Closing the bot")
+        await self.pg_pool.close()  # type: ignore
         await super().close()
 
-    ### Bot Events
     async def on_ready(self) -> None:
         """This event runs when the bot is connected and ready to be used."""
-
-        ## Create task to connect to the lavalink server.
         lines = "~~~" * 30
-
         logger.info(
             "\n%s\n%s is online in %s servers, and is ready to review movies!\n%s",
             lines,
@@ -72,7 +72,7 @@ class RumbleReviewsBot(commands.Bot):
         )
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
-        """When Rumble joins a guild it adds that guild and a default server prefix to database"""
+        """This event runs when the bot joins a new guild."""
         join_msg = (
             "Rumble, your personal Movie rater is here!\n\n"
             "Ready to review some movies? Start by using my slash commands. Simply type ``/review`` followed by a movie title, show title or direct IMDB link to get started.\n\n"
@@ -84,19 +84,17 @@ class RumbleReviewsBot(commands.Bot):
             guild.member_count,
         )
 
-        # First, try to send message to system channel
         if (
             guild.system_channel
             and guild.system_channel.permissions_for(guild.me).send_messages
         ):
             try:
                 await guild.system_channel.send(join_msg)
-                return  # If successful, we don't need to do anything else
+                return
             except discord.HTTPException as exc:
                 logger.exception("Failed to send message to system channel")
                 raise exc
 
-        # If we reach here, system channel is not available, let's find a suitable channel
         all_channels = [
             channel
             for channel in guild.text_channels
@@ -104,7 +102,7 @@ class RumbleReviewsBot(commands.Bot):
         ]
         logger.info("All channels: %s", all_channels)
 
-        if not all_channels:  # If there's no valid channels
+        if not all_channels:
             try:
                 if not isinstance(guild.owner, discord.Member):
                     logger.error("Guild owner is not a member")
@@ -120,23 +118,19 @@ class RumbleReviewsBot(commands.Bot):
                 )
             except discord.Forbidden:
                 logger.error("Guild owner has disabled DM's" * 10)
-            return  # After sending DM or logging error, exit function
+            return
 
-        # If we reach here, there's at least one valid channel
         valid_channels = [
             channel
             for channel in all_channels
             if "general" in channel.name.lower() or "bot" in channel.name.lower()
         ]
 
-        # Pick the first 'valid' channel, or if there's none, the first 'all' channel
         channel_to_send = valid_channels[0] if valid_channels else all_channels[0]
         await channel_to_send.send(join_msg)
 
     async def on_guild_remove(self, guild: discord.Guild):
-        """
-        Triggers when the Client leaves the Guild
-        """
+        """This event runs when the bot leaves a guild."""
         logger.info(
             "Rumble has left %s, this guild had %s members",
             guild.name,
@@ -144,42 +138,33 @@ class RumbleReviewsBot(commands.Bot):
         )
 
 
-async def main():
-    """main function"""
-
+async def main() -> None:
+    """Run the bot."""
     async with RumbleReviewsBot() as bot:
         await cog_loader(client=bot)
 
         @bot.command(name="sync")
         @commands.guild_only()
         @commands.is_owner()
-        async def _sync(
-            ctx: commands.Context,
+        async def _(
+            ctx: commands.Context,  # type: ignore
             guilds: commands.Greedy[discord.Object],
             spec: typing.Optional[typing.Literal["~", "*", "^"]] = None,
         ) -> None:
-            """
-            A normal client.command for syncing app_commands.tree
-
-            Works like:
-            !sync -> global sync
-            !sync ~ -> sync current guild
-            !sync * -> copies all global app commands to current guild and syncs
-            !sync ^ -> clears all commands from the current guild target and syncs (removes guild commands)
-            !sync id_1 id_2 -> syncs guilds with id 1 and 2
-            """
+            """Sync the tree to the current guild or globally."""
+            logger.info("Syncing the tree")
             if not guilds:
                 if spec == "~":
-                    synced = await ctx.bot.tree.sync(guild=ctx.guild)
+                    synced = await bot.tree.sync(guild=ctx.guild)
                 elif spec == "*":
-                    ctx.bot.tree.copy_global_to(guild=ctx.guild)
-                    synced = await ctx.bot.tree.sync(guild=ctx.guild)
+                    bot.tree.copy_global_to(guild=ctx.guild)  # type: ignore
+                    synced = await bot.tree.sync(guild=ctx.guild)
                 elif spec == "^":
-                    ctx.bot.tree.clear_commands(guild=ctx.guild)
-                    await ctx.bot.tree.sync(guild=ctx.guild)
+                    bot.tree.clear_commands(guild=ctx.guild)
+                    await bot.tree.sync(guild=ctx.guild)
                     synced = []
                 else:
-                    synced = await ctx.bot.tree.sync()
+                    synced = await bot.tree.sync()
 
                 await ctx.send(
                     f"Synced {len(synced)} commands "
@@ -190,7 +175,7 @@ async def main():
             ret = 0
             for guild in guilds:
                 try:
-                    await ctx.bot.tree.sync(guild=guild)
+                    await bot.tree.sync(guild=guild)
                 except discord.HTTPException:
                     pass
                 else:
@@ -201,24 +186,20 @@ async def main():
         @bot.command(name="close", alias="shutdown")
         @commands.guild_only()
         @commands.is_owner()
-        async def _close(
-            ctx: commands.Context,
+        async def _(
+            ctx: commands.Context,  # type: ignore
         ) -> None:
-            """
-            Shutdown command for Rumble
-            """
+            """Close the bot."""
             await ctx.send("Bot will shutdown soon")
             await bot.close()
 
         @bot.command(name="reload", alias="cogs")
         @commands.guild_only()
         @commands.is_owner()
-        async def _reload(
-            ctx: commands.Context,
+        async def _(
+            ctx: commands.Context,  # type: ignore
         ) -> None:
-            """
-            reloads cogs for Rumble
-            """
+            """Reload the cogs."""
             await cog_reloader(client=bot)
             await ctx.send("Cogs are being reloaded")
 

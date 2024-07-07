@@ -16,6 +16,7 @@ handlers:
     filename: discord.log
     when: midnight
     backupCount: 7
+    encoding: utf-8
 loggers:
   "":
     level: DEBUG

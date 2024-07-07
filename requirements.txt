@@ -1,6 +1,6 @@
 discord.py
 rich
-motor
+asyncpg
 aiohttp
 python-dotenv
 pyyaml

@@ -4,3 +4,4 @@ discord.log
 venv
 .venv
 __pycache__/
+script.py
